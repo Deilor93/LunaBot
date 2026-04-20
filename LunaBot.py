@@ -46,7 +46,7 @@ async def on_message(msg):
 @bot.tree.command(name="play", description="Play a song or add it to queue")
 @app_commands.describe(song_query="Search query")
 async def play(interaction: discord.Interaction, song_query: str):
-    await interaction.response.defer()
+    await interaction.response.defer(thinking=True)
     
     voice_state = interaction.user.voice
 
