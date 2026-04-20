@@ -62,8 +62,7 @@ async def play(interaction: discord.Interaction, song_query: str):
     elif voice_channel != voice_client.channel:
         await voice_client.move_to(voice_channel)
 
-    if "list=RD" in song_query:
-        song_query = song_query.split("&list=")[0]
+
     
     is_url = song_query.startswith("http://") or song_query.startswith("https://")
 
