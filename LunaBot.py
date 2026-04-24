@@ -38,10 +38,6 @@ async def on_ready():
     print(f"Synced {len(synced)} commands")
     print(f"{bot.user} is online")
 
-@bot.event
-async def on_message(msg):
-    if msg.author.id != bot.user.id:
-        await msg.channel.send(f"Got it, {msg.author.mention}")
 
 @bot.tree.command(name="play", description="Play a song or add it to queue")
 @app_commands.describe(song_query="Search query")
