@@ -1,28 +1,13 @@
 import asyncio
 import discord
+from discord import player
 import yt_dlp
 from discord import app_commands
 from discord.ext import commands
 
-from core.music_player import MusicPlayer
+from core.music_player import MusicPlayer, YDL_OPTIONS_SINGLE, YDL_OPTIONS_PLAYLIST
 
-GUILD_ID = 1495489083642876067
 
-YDL_OPTIONS_SINGLE = {
-    "format": "bestaudio[abr<=96]/bestaudio",
-    "youtube_include_dash_manifest": False,
-    "youtube_include_hls_manifest": False,
-    "noplaylist": True,
-    "extract_flat": False,
-}
-
-YDL_OPTIONS_PLAYLIST = {
-    "format": "bestaudio[abr<=96]/bestaudio",
-    "youtube_include_dash_manifest": False,
-    "youtube_include_hls_manifest": False,
-    "noplaylist": False,
-    "extract_flat": "in_playlist",
-}
 
 
 def _extract(query: str, ydl_opts: dict):
@@ -35,7 +20,7 @@ async def search_ytdlp_async(query: str, ydl_opts: dict):
     try:
         return await asyncio.wait_for(
             loop.run_in_executor(None, lambda: _extract(query, ydl_opts)),
-            timeout=30.0
+            timeout=60.0
         )
     except asyncio.TimeoutError:
         print(f"[ERROR] yt-dlp timed out for query: {query}")
@@ -57,7 +42,7 @@ class QueueView(discord.ui.View):
 
         lines = [
             f"**{start + i + 1}.** {title}"
-            for i, (_, title, _resolved) in enumerate(page_entries)
+            for i, (_, title) in enumerate(page_entries)
         ]
         description = "\n".join(lines) or "Empty"
 
@@ -109,7 +94,7 @@ class Music(commands.Cog):
             vc = current_voice_client
 
         if guild_id not in self._players:
-            self._players[guild_id] = MusicPlayer(vc, text_channel)
+            self._players[guild_id] = MusicPlayer(vc, text_channel, guild_id)
         else:
             self._players[guild_id].voice_client = vc
 
@@ -136,7 +121,7 @@ class Music(commands.Cog):
         print(f"[DEBUG] Player created/fetched for guild {guild_id}")
 
         is_url = song_query.startswith(("http://", "https://"))
-        is_playlist_url = is_url and ("playlist?list=" in song_query or "/sets/" in song_query)
+        is_playlist_url = is_url and ("PL" in song_query or "/sets/" in song_query)
         print(f"[DEBUG] is_url={is_url}, is_playlist_url={is_playlist_url}, query='{song_query}'")
 
         # ── Branch 1: playlist URL ─────────────────────────────────────────────
@@ -154,21 +139,10 @@ class Music(commands.Cog):
             added_count = 0
 
             for entry in valid:
-                # extract_flat gives us webpage_url, we need to fully resolve each one
                 webpage_url = entry.get("webpage_url") or entry.get("url")
                 title = entry.get("title", "Untitled")
-
-                if not webpage_url:
-                    continue
-
-                # Full extract for each track to get a real audio URL
-                full = await search_ytdlp_async(webpage_url, YDL_OPTIONS_SINGLE)
-                if not full:
-                    continue
-
-                audio_url = full.get("url") or full.get("webpage_url")
-                if audio_url:
-                    player.add_to_queue(audio_url, title)
+                if webpage_url:
+                    player.add_to_queue(webpage_url, title)
                     added_count += 1
 
             await interaction.followup.send(
@@ -204,7 +178,8 @@ class Music(commands.Cog):
         else:
             await interaction.followup.send(f"Now playing: **{title}**")
 
-        await player.add_and_play(audio_url, title, self.bot.loop)
+        webpage_url = track.get("webpage_url") or track.get("url")
+        await player.add_and_play(webpage_url, title, self.bot.loop)
 
     # ── /skip ──────────────────────────────────────────────────────────────────
 
@@ -253,7 +228,6 @@ class Music(commands.Cog):
         guild_id = str(interaction.guild_id)
         player = self.get_player(guild_id)
         if player:
-            player.clear()
             self._players.pop(guild_id, None)
 
         if vc.is_playing() or vc.is_paused():
@@ -275,7 +249,7 @@ class Music(commands.Cog):
             return await interaction.followup.send("📭 The queue is empty.")
 
         try:
-            snapshot = list(player.queue)
+            snapshot = list(player.queue)  # ← pass the raw snapshot of tuples
             view = QueueView(snapshot, player.current)
             view.update_buttons()
             await interaction.followup.send(embed=view.build_embed(), view=view)
@@ -284,6 +258,40 @@ class Music(commands.Cog):
             print(f"[ERROR] queue command crashed: {e}")
             await interaction.followup.send("Something went wrong displaying the queue.")
 
+    # --/resume_queue
+
+    @app_commands.command(name="resume_queue", description="Resume the saved queue from the last session")
+    async def resume_queue(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return await interaction.followup.send("You need to be in a voice channel.")
+
+        guild_id = str(interaction.guild_id)
+        print(f"[DEBUG] resume_queue: looking for guild_id={guild_id}")
+        saved = MusicPlayer.load_queue_for_guild(guild_id)
+        print(f"[DEBUG] resume_queue: found {len(saved)} entries")
+
+        if not saved:
+            return await interaction.followup.send("No saved queue found for this server.")
+
+        voice_channel = interaction.user.voice.channel
+        player = await self.get_or_create_player(
+            guild_id,
+            voice_channel,
+            interaction.channel,
+            interaction.guild.voice_client,
+        )
+
+        if player.queue:
+            return await interaction.followup.send("There's already an active queue. Use `/stop` first.")
+
+        for webpage_url, title in saved:
+            player.queue.append((webpage_url, title))
+            player.master_list.append((webpage_url, title))
+
+        await interaction.followup.send(f"▶️ Resuming saved queue ({len(saved)} songs)!")
+        await player.play_next(self.bot.loop)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Music(bot))
